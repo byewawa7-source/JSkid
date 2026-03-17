@@ -1548,7 +1548,7 @@
 
     _renderTweak(def) {
       const val = this._j.tweaks.get(def.id);
-      const row = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--jsk-border)22' } });
+      const row = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--jsk-border)' } });
       row.appendChild(el('label', { style: { fontSize: '13px', cursor: 'pointer' } }, def.label));
 
       let ctrl;
@@ -1556,39 +1556,28 @@
         ctrl = el('button', {
           class: 'jskid-toggle' + (val ? ' on' : ''),
           style: { width: '38px', height: '20px', borderRadius: '10px', border: 'none', cursor: 'pointer', background: val ? 'var(--jsk-accent)' : 'var(--jsk-bg3)', transition: 'background 0.2s', flexShrink: '0', position: 'relative' },
-          onClick(e) {
-            const newVal = !this._j?.tweaks.get(def.id);
-            // use closure from outer scope
-          },
-        });
-        ctrl.addEventListener('click', () => {
-          const newVal = !this._j.tweaks.get(def.id);
-          this._j.tweaks.set(def.id, newVal);
-          ctrl.style.background = newVal ? 'var(--jsk-accent)' : 'var(--jsk-bg3)';
         });
         const knob = el('div', { style: { position: 'absolute', top: '2px', left: val ? '20px' : '2px', width: '16px', height: '16px', borderRadius: '50%', background: '#fff', transition: 'left 0.2s' } });
         ctrl.appendChild(knob);
         ctrl.addEventListener('click', () => {
-          knob.style.left = knob.style.left === '2px' ? '20px' : '2px';
+          const newVal = !this._j.tweaks.get(def.id);
+          this._j.tweaks.set(def.id, newVal);
+          ctrl.style.background = newVal ? 'var(--jsk-accent)' : 'var(--jsk-bg3)';
+          knob.style.left = newVal ? '20px' : '2px';
         });
 
       } else if (def.type === 'range') {
         const label = el('span', { style: { width: '40px', textAlign: 'right', color: 'var(--jsk-fg2)', fontSize: '12px' } }, String(val));
-        ctrl = el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
-          el('input', {
-            type: 'range', min: String(def.min), max: String(def.max), step: String(def.step), value: String(val),
-            style: { accentColor: 'var(--jsk-accent)', cursor: 'pointer' },
-            onInput(e) { label.textContent = e.target.value; },
-            onChange(e) {
-              this._j?.tweaks.set(def.id, parseFloat(e.target.value));
-            }.bind(this),
-          }),
-          label,
-        );
-        ctrl.querySelector('input').addEventListener('change', e => {
+        const input = el('input', {
+          type: 'range', min: String(def.min), max: String(def.max), step: String(def.step), value: String(val),
+          style: { accentColor: 'var(--jsk-accent)', cursor: 'pointer' },
+        });
+        input.addEventListener('input',  e => { label.textContent = e.target.value; });
+        input.addEventListener('change', e => {
           this._j.tweaks.set(def.id, parseFloat(e.target.value));
           label.textContent = e.target.value;
         });
+        ctrl = el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, input, label);
 
       } else if (def.type === 'color') {
         ctrl = el('input', { type: 'color', value: val, style: { cursor: 'pointer', border: 'none', background: 'none', width: '36px', height: '28px' } });
