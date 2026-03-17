@@ -23,7 +23,7 @@
 
   // ─── CONFIG ───────────────────────────────────────────────────────────────
   const JSKID_CORE_URL =
-    'https://raw.githubusercontent.com/byewawa7-source/JSkid/refs/heads/main/jskid-core.js';
+    'https://raw.githubusercontent.com/YOUR_USERNAME/jskid/main/jskid-core.js';
   const CACHE_KEY   = 'jskid_core_cache';
   const CACHE_TTL   = 1000 * 60 * 60; // 1 hour
   const FORCE_KEY   = 'jskid_force_reload';
