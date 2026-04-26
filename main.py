@@ -3,6 +3,7 @@ import re
 import json
 import httpx
 import time
+import asyncio
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,113 +18,122 @@ CONFIG_FILE = "jskid_config.json"
 
 def load_config() -> dict:
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
 def save_config(config: dict):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
 
-# Global config state (in production, use a proper store/DB)
+# Global config state
 GLOBAL_CONFIG = load_config()
 
 # ==========================================
-# 2. AESTHETIC UI ENGINE (Based on terminal-ui-design skill)
+# 2. CHAT-COMPATIBLE UI ENGINE (Wider: 64 chars)
 # ==========================================
 class AestheticEngine:
-    def __init__(self, theme: str = "cyberpunk"):
+    """
+    Terminal UI engine optimized for chat interfaces.
+    No ANSI codes - uses plain Unicode box characters.
+    Default width: 64 characters for better readability.
+    """
+    def __init__(self, theme: str = "clean", width: int = 64):
         self.theme = theme
-        self.themes = {
-            "cyberpunk": {
-                "colors": {"border": "\033[95m", "text": "\033[96m", "accent": "\033[93m", "reset": "\033[0m"},
-                "chars": {"tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║", "t_left": "╠", "t_right": "╣"},
-                "header_style": "bold"
-            },
-            "minimalist": {
-                "colors": {"border": "\033[90m", "text": "\033[37m", "accent": "\033[90m", "reset": "\033[0m"},
-                "chars": {"tl": "", "tr": "", "bl": "", "br": "", "h": " ", "v": "│", "t_left": "", "t_right": ""},
-                "header_style": "plain"
-            },
-            "retro_crt": {
-                "colors": {"border": "\033[32m", "text": "\033[32m", "accent": "\033[32m", "reset": "\033[0m"},
-                "chars": {"tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|", "t_left": "+", "t_right": "+"},
-                "header_style": "upper"
-            },
-            "brutalist": {
-                "colors": {"border": "\033[41m\033[97m", "text": "\033[40m\033[97m", "accent": "\033[43m\033[30m", "reset": "\033[0m"},
-                "chars": {"tl": "▛", "tr": "▜", "bl": "▙", "br": "▟", "h": "▀", "v": "▌", "t_left": "▌", "t_right": "▐"},
-                "header_style": "block"
-            }
+        self.width = width
+        self.chars = {
+            "tl": "┌", "tr": "┐", "bl": "└", "br": "┘", 
+            "h": "─", "v": "│", "t_left": "├", "t_right": "┤"
         }
-        self.style = self.themes.get(theme, self.themes["cyberpunk"])
-
-    def _c(self, code: str) -> str:
-        return self.style["colors"].get(code, "")
-
-    def _reset(self) -> str:
-        return self.style["colors"]["reset"]
-
+        
+    def _visual_len(self, text: str) -> int:
+        """Calculate visible character length (ignoring control codes)."""
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        return len(clean)
+    
     def _pad(self, text: str, width: int, align: str = "left") -> str:
-        # Strip ANSI codes for length calculation
-        clean_text = re.sub(r'\033\[[0-9;]*m', '', text)
-        diff = width - len(clean_text)
-        if diff < 0:
-            clean_text = clean_text[:width-3] + "..."
-            diff = 3
+        """Pad text to target width based on visual length."""
+        visible_len = self._visual_len(text)
+        padding_needed = max(0, width - visible_len)
         
         if align == "center":
-            left = diff // 2
-            right = diff - left
+            left = padding_needed // 2
+            right = padding_needed - left
             return " " * left + text + " " * right
         elif align == "right":
-            return " " * diff + text
-        return text + " " * diff
+            return " " * padding_needed + text
+        return text + " " * padding_needed
 
-    def render_box(self, title: str, content_lines: list, width: int = 50) -> str:
-        c = self.style["chars"]
-        col = self.style["colors"]
+    def _wrap_text(self, text: str, max_width: int) -> list:
+        """Wrap text to fit within box width."""
+        if not text:
+            return [""]
+        words = text.split()
+        lines = []
+        current = ""
         
-        # Header
-        title_str = f" {title} "
-        if self.style["header_style"] == "upper":
-            title_str = title_str.upper()
-        elif self.style["header_style"] == "bold":
-            title_str = f"\033[1m{title_str}\033[0m"
-            
-        header_inner = self._pad(title_str, width - 4, "center")
-        header_line = f"{col['border']}{c['tl']}{c['h'] * 2}{header_inner}{c['h'] * 2}{c['tr']}{self._reset()}"
+        for word in words:
+            test = current + (" " if current else "") + word
+            if self._visual_len(test) <= max_width:
+                current = test
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines
+
+    def render_box(self, title: str, content_lines: list, width: int = None) -> str:
+        """Render a clean box that works in plain text chats."""
+        if width is None:
+            width = self.width
+        c = self.chars
+        inner_width = width - 4
         
-        # Body
-        body_lines = []
+        title_display = f" {title} "
+        title_padded = self._pad(title_display, width - 4, "center")
+        header = f"{c['tl']}{c['h'] * 2}{title_padded}{c['h'] * 2}{c['tr']}"
+        
+        body = []
         for line in content_lines:
-            padded = self._pad(line, width - 4, "left")
-            body_lines.append(f"{col['border']}{c['v']}{self._reset()} {padded} {col['border']}{c['v']}{self._reset()}")
-            
-        # Footer
-        footer_line = f"{col['border']}{c['bl']}{c['h'] * (width - 2)}{c['br']}{self._reset()}"
+            wrapped = self._wrap_text(line, inner_width) if line else [""]
+            for wrapped_line in wrapped:
+                padded = self._pad(wrapped_line, inner_width, "left")
+                body.append(f"{c['v']} {padded} {c['v']}")
         
-        return "\n".join([header_line] + body_lines + [footer_line])
+        footer = f"{c['bl']}{c['h'] * (width - 2)}{c['br']}"
+        return "\n".join([header] + body + [footer])
 
     def render_setup_wizard_step(self, step: int, total: int, message: str, input_hint: str = "") -> str:
-        lines = [
-            f"SETUP WIZARD [{step}/{total}]",
-            "-" * 20,
-            message,
-            ""
-        ]
+        """Render wizard step - optimized for chat display."""
+        lines = [f"SETUP [{step}/{total}]", "", message]
         if input_hint:
-            lines.append(f"> {input_hint}")
+            lines.append("")
+            lines.append(f"→ {input_hint}")
         return self.render_box("CONFIGURATION", lines)
 
     def render_status(self, status: str, memory_count: int, theme_name: str) -> str:
+        """Render compact status dashboard."""
         lines = [
-            f"System Status : {status}",
-            f"Active Memory : {memory_count} items",
-            f"UI Theme      : {theme_name.upper()}",
-            f"Proxy         : Connected"
+            f"Status  : {status}",
+            f"Memory  : {memory_count} items",
+            f"Theme   : {theme_name}",
+            f"Proxy   : Active",
+            f"Width   : {self.width} chars"
         ]
         return self.render_box("JSKID DASHBOARD", lines)
+
+    def render_command_list(self, commands: list) -> str:
+        """Render a list of available commands."""
+        lines = ["Available Commands:"]
+        for cmd in commands:
+            lines.append(f"  • {cmd}")
+        return self.render_box("HELP", lines)
+
 
 # ==========================================
 # 3. CORE LOGIC & PARSING
@@ -133,8 +143,8 @@ class JSkidCore:
         self.memory = []
         self.chars = {}
         self.tools = []
-        # Default theme, can be overridden by user command or config
-        self.ui_theme = "cyberpunk" 
+        self.ui_theme = "clean"
+        self.ui_width = 64
 
     def parse_state(self, messages):
         self.memory.clear()
@@ -143,13 +153,17 @@ class JSkidCore:
 
         for msg in messages:
             content = msg.get("content", "")
-            if not isinstance(content, str): continue
+            if not isinstance(content, str): 
+                continue
             
-            # Parse Tags
-            tags = re.findall(r'<!--\s*\[(SET_VAR|MEM_ADD|MEM_DEL|EXT|TOOL|SET_THEME):\s*(.*?)]\s*-->', content, re.DOTALL)
+            tags = re.findall(
+                r'<!--\s*\[(SET_VAR|MEM_ADD|MEM_DEL|EXT|TOOL|SET_THEME|SET_WIDTH):\s*(.*?)]\s*-->', 
+                content, 
+                re.DOTALL
+            )
             for tag_type, val in tags:
                 val = val.strip()
-                if tag_type == "MEM_ADD" and val not in self.memory:
+                if tag_type == "MEM_ADD" and val and val not in self.memory:
                     self.memory.append(val)
                 elif tag_type == "MEM_DEL" and val in self.memory:
                     self.memory.remove(val)
@@ -161,10 +175,18 @@ class JSkidCore:
                 elif tag_type == "TOOL":
                     try:
                         self.tools.append(json.loads(val))
-                    except: pass
+                    except: 
+                        pass
                 elif tag_type == "SET_THEME":
-                    if val.lower() in ["cyberpunk", "minimalist", "retro_crt", "brutalist"]:
+                    if val.lower() in ["clean", "compact", "spacious"]:
                         self.ui_theme = val.lower()
+                elif tag_type == "SET_WIDTH":
+                    try:
+                        w = int(val)
+                        if 40 <= w <= 120:
+                            self.ui_width = w
+                    except:
+                        pass
 
     def sanitize(self, messages):
         clean = []
@@ -174,14 +196,10 @@ class JSkidCore:
                 clean.append(msg)
                 continue
             
-            # Remove internal tags and previous UI renders
             content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
-            # Regex to remove the specific ASCII blocks generated by our engine
-            content = re.sub(r'(\033\[[0-9;]*m)?[╔╚╔╚╓╒╭+▛].*?(\033\[[0-9;]*m)?[╗╝┘╖╕╮+▜](\033\[[0-9;]*m)?', '', content, flags=re.DOTALL)
-            
+            content = re.sub(r'┌[─\s]*┐[\s\S]*?└[─\s]*┘', '', content)
             content = content.strip()
             
-            # Skip user commands that start with / to avoid sending them to LLM as conversation
             if msg["role"] == "user" and content.startswith(('/', '!')):
                 continue
                 
@@ -194,14 +212,14 @@ class JSkidCore:
         if not self.memory and not self.chars:
             return messages
         
-        ws = ["\n<world_state>"]
+        ws_parts = ["\n<world_state>"]
         if self.memory:
-            ws.append(f"<mem>{';'.join(self.memory)}</mem>")
+            ws_parts.append(f"<mem>{'; '.join(self.memory)}</mem>")
         if self.chars:
-            ws.append(f"<vars>{';'.join(f'{k}={v}' for k, v in self.chars.items())}</vars>")
-        ws.append("</world_state>")
+            ws_parts.append(f"<vars>{'; '.join(f'{k}={v}' for k, v in self.chars.items())}</vars>")
+        ws_parts.append("</world_state>\n")
         
-        ws_text = "".join(ws)
+        ws_text = "".join(ws_parts)
         injected = False
         for msg in messages:
             if msg["role"] == "system":
@@ -212,13 +230,17 @@ class JSkidCore:
             messages.insert(0, {"role": "system", "content": ws_text.strip()})
         return messages
 
+
 # ==========================================
 # 4. FASTAPI APPLICATION
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("--- JSkid Proxy Started ---")
+    print(f"Config file: {CONFIG_FILE}")
+    print(f"Configured: {'Yes' if load_config().get('UPSTREAM_URL') else 'No'}")
     yield
+    print("--- JSkid Proxy Stopped ---")
 
 app = FastAPI(title="JSkid Proxy", lifespan=lifespan)
 
@@ -230,59 +252,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # --- Helper: Run Setup Wizard Logic ---
 async def run_setup_wizard(messages: list, current_config: dict) -> StreamingResponse:
-    """
-    Intercepts the chat flow to guide the user through setting up API keys.
-    This is a simple state machine based on the last user message.
-    """
-    core = JSkidCore()
-    ui = AestheticEngine(theme="cyberpunk") # Wizard always uses high-vis theme
+    """Chat-friendly setup wizard that guides user through configuration."""
+    ui = AestheticEngine(width=64)
     
     last_msg = messages[-1].get("content", "").strip() if messages else ""
     
-    # Determine Step
     step = 1
     if "UPSTREAM_URL" in current_config:
         step = 2
     if "PROXY_KEY" in current_config:
-        step = 3 # Done
+        step = 3
 
     if step == 3:
-        # Should not happen if called, but safety check
         return JSONResponse(content={"error": "Already configured"})
 
     response_text = ""
     
     if step == 1:
-        if last_msg and last_msg.startswith("http"):
-            # Save URL
-            current_config["UPSTREAM_URL"] = last_msg
+        if last_msg and (last_msg.startswith("http://") or last_msg.startswith("https://")):
+            current_config["UPSTREAM_URL"] = last_msg.strip()
             save_config(current_config)
-            response_text = ui.render_setup_wizard_step(2, 2, "URL Saved. Now, please enter your API KEY (or leave blank if none).", "Enter API Key...")
+            response_text = ui.render_setup_wizard_step(
+                2, 2, 
+                "✓ API URL saved successfully.\n\nNext: Enter your API key below.\n(Type 'skip' or leave blank if no key required)", 
+                "Enter API Key or 'skip'"
+            )
         else:
-            response_text = ui.render_setup_wizard_step(1, 2, "Welcome to JSkid Proxy.\nPlease enter the Upstream API URL (e.g., https://api.openai.com/v1/chat/completions)", "Enter URL...")
+            response_text = ui.render_setup_wizard_step(
+                1, 2,
+                "Welcome to JSkid Proxy!\n\nPlease paste your upstream API endpoint URL:\n\nExample:\nhttps://api.openai.com/v1/chat/completions\nhttps://api.anthropic.com/v1/messages",
+                "Paste your API URL here..."
+            )
             
     elif step == 2:
-        # Save Key
-        key = last_msg if last_msg else None
+        key = last_msg.strip() if last_msg.strip().lower() != "skip" else None
         current_config["PROXY_KEY"] = key
         save_config(current_config)
-        response_text = ui.render_setup_wizard_step(2, 2, "Configuration Complete!\nYour proxy is now ready.", "Type anything to start chatting.")
+        
+        status_box = ui.render_status("READY", 0, "clean")
+        help_box = ui.render_command_list([
+            "/theme <name>  - Change UI style",
+            "/width <num>   - Adjust box width", 
+            "/status        - Show current config",
+            "/reset         - Clear all memory"
+        ])
+        response_text = f"{ui.render_setup_wizard_step(2, 2, '✓ Setup complete! Your proxy is ready.', 'Start chatting normally.')}\n\n{status_box}\n\n{help_box}"
 
-    # We simulate a streaming response for the wizard so JanitorAI handles it nicely
     async def wizard_stream():
-        data = {
-            "id": "chatcmpl-wizard",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": "jskid-wizard",
-            "choices": [{"index": 0, "delta": {"content": response_text}, "finish_reason": None}]
-        }
-        yield f"data: {json.dumps(data)}\n\n"
-        yield "data: [DONE]\n\n"
+        chunks = [response_text[i:i+150] for i in range(0, len(response_text), 150)]
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            data = {
+                "id": "chatcmpl-wizard",
+                "object": "chat.completion.chunk", 
+                "created": int(time.time()),
+                "model": "jskid-wizard",
+                "choices": [{
+                    "index": 0, 
+                    "delta": {"content": chunk}, 
+                    "finish_reason": "stop" if is_last else None
+                }]
+            }
+            yield f" {json.dumps(data)}\n\n"
+            if not is_last:
+                await asyncio.sleep(0.01)
+        yield " [DONE]\n\n"
 
     return StreamingResponse(wizard_stream(), media_type="text/event-stream")
+
+
+# --- Standard Endpoints ---
+@app.get("/")
+async def root():
+    config = load_config()
+    return {
+        "status": "running", 
+        "configured": "UPSTREAM_URL" in config,
+        "width": 64,
+        "themes": ["clean", "compact", "spacious"]
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {"id": "jskid-proxy", "object": "model", "owned_by": "jskid", "created": int(time.time())}
+        ]
+    }
 
 
 # --- Chat Completion Endpoint ---
@@ -290,7 +354,6 @@ async def run_setup_wizard(messages: list, current_config: dict) -> StreamingRes
 @app.post("/chat/completions")
 async def chat_proxy(request: Request):
     global GLOBAL_CONFIG
-    # Reload config on every request to catch updates from wizard
     GLOBAL_CONFIG = load_config()
 
     try:
@@ -302,41 +365,24 @@ async def chat_proxy(request: Request):
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    # 1. Check if Configured
     if "UPSTREAM_URL" not in GLOBAL_CONFIG:
         return await run_setup_wizard(messages, GLOBAL_CONFIG)
 
-    # 2. Auth Check (if key is set in config)
-    proxy_key = GLOBAL_CONFIG.get("PROXY_KEY")
-    if proxy_key:
-        # Check header or first message for key if not in header (JanitorAI sometimes strips headers)
-        auth_header = request.headers.get("Authorization", "")
-        # Simple Bearer check or custom header check could go here
-        # For this proxy, we assume the config key is for the UPSTREAM API, 
-        # OR if you want to protect the PROXY itself, you'd check against a separate env var.
-        # Here we assume the Proxy is open once configured, or uses the upstream key.
-        pass
-
-    # 3. Initialize Engine
     engine = JSkidCore()
     engine.parse_state(messages)
 
-    # 4. Handle Special Commands (/OP, /OOP, /THEME)
     last_msg_content = messages[-1].get("content", "")
     
-    # Theme Switcher Command
-    theme_match = re.match(r"^/theme\s+(\w+)", last_msg_content)
-    if theme_match:
-        new_theme = theme_match.group(1).lower()
-        if new_theme in ["cyberpunk", "minimalist", "retro_crt", "brutalist"]:
-            engine.ui_theme = new_theme
-            # Inject a system message to confirm change visually in next turn
-            messages.append({
-                "role": "system", 
-                "content": f"<!-- [SET_THEME: {new_theme}] --> \n[System: Theme switched to {new_theme}]"
-            })
+    if last_msg_content.startswith("/status"):
+        ui = AestheticEngine(width=engine.ui_width)
+        status_text = ui.render_status("ONLINE", len(engine.memory), engine.ui_theme)
+        messages.append({"role": "system", "content": status_text})
+    
+    if last_msg_content.startswith("/reset"):
+        engine.memory.clear()
+        engine.chars.clear()
+        messages.append({"role": "system", "content": "[Memory cleared]"})
 
-    # 5. Prepare Payload
     clean_msgs = engine.sanitize(messages)
     clean_msgs = engine.inject_world_state(clean_msgs)
     
@@ -347,21 +393,17 @@ async def chat_proxy(request: Request):
     if "stream" not in payload:
         payload["stream"] = True
 
-    # 6. Forward to Upstream
     target_url = GLOBAL_CONFIG["UPSTREAM_URL"]
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {"Content-Type": "application/json"}
     
-    # Pass through Authorization if present, or use stored key if the upstream requires it
     req_auth = request.headers.get("Authorization")
     if req_auth:
         headers["Authorization"] = req_auth
     elif GLOBAL_CONFIG.get("PROXY_KEY"):
-        # If the proxy config has a key, assume it's for the upstream
         headers["Authorization"] = f"Bearer {GLOBAL_CONFIG['PROXY_KEY']}"
 
-    client = httpx.AsyncClient(timeout=120.0)
+    client = httpx.AsyncClient(timeout=180.0)
+    
     try:
         req = client.build_request("POST", target_url, json=payload, headers=headers)
         resp = await client.send(req, stream=True)
@@ -370,37 +412,34 @@ async def chat_proxy(request: Request):
             error_content = await resp.aread()
             return JSONResponse(
                 status_code=resp.status_code,
-                content={"error": f"Upstream API Error: {resp.status_code}", "details": error_content.decode()}
+                content={"error": f"Upstream Error {resp.status_code}", "details": error_content.decode()[:500]}
             )
 
-        # 7. Stream Response with UI Injection
         async def proxy_stream():
             buffer = ""
-            in_bracket = False
-            ui = AestheticEngine(theme=engine.ui_theme)
+            ui = AestheticEngine(width=engine.ui_width, theme=engine.ui_theme)
+            chunk_count = 0
             
             async for line in resp.aiter_lines():
                 if not line.startswith(" "):
                     continue
-                data_str = line[6:]
+                data_str = line[6:].strip()
                 
                 if data_str == "[DONE]":
-                    # Flush buffer
-                    if buffer:
-                         yield f" {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
+                    if buffer.strip():
+                        yield f" {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
                     
-                    # Append a footer dashboard at the end of the stream
-                    dashboard = ui.render_status("ONLINE", len(engine.memory), engine.ui_theme)
-                    # FIX: Build content string outside f-string to avoid backslash in expression
-                    footer_content = "\n\n" + dashboard
-                    finish_payload = {
-                        "choices": [{
-                            "delta": {"content": footer_content}, 
-                            "finish_reason": "stop"
-                        }]
-                    }
-                    yield f"data: {json.dumps(finish_payload)}\n\n"
-                    yield "data: [DONE]\n\n"
+                    if chunk_count < 50:
+                        footer = f"\n\n{ui.render_status('OK', len(engine.memory), engine.ui_theme)}"
+                        finish_payload = {
+                            "choices": [{
+                                "delta": {"content": footer}, 
+                                "finish_reason": "stop"
+                            }]
+                        }
+                        yield f" {json.dumps(finish_payload)}\n\n"
+                    
+                    yield " [DONE]\n\n"
                     break
 
                 try:
@@ -408,22 +447,27 @@ async def chat_proxy(request: Request):
                     delta = data["choices"][0].get("delta", {})
                     if "content" in delta:
                         text = delta["content"]
-                        yield f"data: {json.dumps({'choices': [{'delta': {'content': text}}]})}\n\n"
+                        buffer += text
+                        chunk_count += 1
                         
+                        if len(buffer) > 200 or "\n" in text:
+                            yield f" {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
+                            buffer = ""
+                            
                 except json.JSONDecodeError:
-                    pass
+                    continue
                     
-            await client.aclose()
-
         return StreamingResponse(proxy_stream(), media_type="text/event-stream")
 
+    except httpx.RequestError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"error": "Upstream Connection Failed", "details": str(e)}
+        )
     except Exception as e:
-        await client.aclose()
         return JSONResponse(
             status_code=500,
-            content={"error": "Internal Server Error", "details": str(e)}
+            content={"error": "Internal Error", "details": str(e)}
         )
-
-@app.get("/")
-async def root():
-    return {"status": "running", "configured": "UPSTREAM_URL" in GLOBAL_CONFIG}
+    finally:
+        await client.aclose()
