@@ -3,7 +3,6 @@ import re
 import json
 import httpx
 import time
-import asyncio
 from urllib.parse import unquote
 from fastapi import FastAPI, Request, HTTPException, Path
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -37,7 +36,7 @@ def resolve_upstream(prefix: str) -> str:
 
 
 # ==========================================
-# 2. CORE ENGINE
+# 2. CORE ENGINE (Memory/Tags/State)
 # ==========================================
 class JSkidCore:
     def __init__(self):
@@ -54,7 +53,7 @@ class JSkidCore:
             if not isinstance(content, str):
                 continue
             tags = re.findall(
-                r'<!--\s*\[(SET_VAR|MEM_ADD|MEM_DEL|TOOL):\s*(.+?)\]\s*-->', 
+                r'<!--\s*\[(SET_VAR|MEM_ADD|MEM_DEL|TOOL):\s*(.+?)\]\s*-->',
                 content, re.DOTALL
             )
             for tag, val in tags:
@@ -107,7 +106,7 @@ class JSkidCore:
 
 
 # ==========================================
-# 3. UI ENGINE (for /status)
+# 3. UI ENGINE (for /status command)
 # ==========================================
 class UIEngine:
     def __init__(self, width: int = 64):
@@ -124,7 +123,7 @@ class UIEngine:
 
 
 # ==========================================
-# 4. FASTAPI APP
+# 4. FASTAPI APPLICATION
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -162,7 +161,7 @@ async def list_models():
 
 
 # ==========================================
-# 5. ROBUST CHAT PROXY
+# 5. CHAT PROXY - ROBUST STREAMING
 # ==========================================
 @app.post("/{prefix}/v1/chat/completions")
 @app.post("/{prefix}/chat/completions")
@@ -182,7 +181,7 @@ async def proxy(request: Request, prefix: str = Path(...)):
 
     core = JSkidCore().parse(messages)
 
-    # Handle /status locally
+    # Handle /status command locally
     last_msg = messages[-1].get("content", "") if messages else ""
     if last_msg.startswith("/status"):
         ui = UIEngine()
@@ -209,12 +208,11 @@ async def proxy(request: Request, prefix: str = Path(...)):
     auth = request.headers.get("Authorization")
     if auth:
         headers["Authorization"] = auth
-    # Copy useful headers for OpenRouter
     for h in ["x-api-key", "http-referer", "x-title", "user-agent"]:
         if request.headers.get(h):
             headers[h] = request.headers[h]
 
-    # === CRITICAL: Increased timeouts for Render free tier ===
+    # Client with generous timeouts for Render free tier
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0),
         limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
@@ -231,23 +229,22 @@ async def proxy(request: Request, prefix: str = Path(...)):
                 content={"error": f"Upstream {resp.status_code}", "details": err.decode()[:300] if err else ""}
             )
 
-        # === Robust streaming with error handling ===
+        # Stream with robust error handling
         async def stream_proxy():
             try:
                 async for line in resp.aiter_lines():
+                    # Pass through SSE lines exactly as received
                     if line.strip():
                         yield f"{line}\n\n"
-            except httpx.ReadError:
-                # Connection dropped - send graceful finish
-                yield ' {"choices":[{"delta":{"content":"\\n\\n[Connection interrupted]"},"finish_reason":"stop"}]}\n\n'
+            except (httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout) as e:
+                # Connection issue - send graceful finish
+                print(f"[Stream interrupted] {type(e).__name__}")
+                yield ' {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}\n\n'
                 yield " [DONE]\n\n"
             except asyncio.CancelledError:
-                # Client disconnected - clean up
                 pass
             except Exception as e:
-                # Log and send error chunk
                 print(f"[Stream error] {e}")
-                yield f' {{"error":"Streaming error: {str(e)[:100]}"}}\n\n'
             finally:
                 await resp.aclose()
                 await client.aclose()
@@ -255,24 +252,23 @@ async def proxy(request: Request, prefix: str = Path(...)):
         return StreamingResponse(stream_proxy(), media_type="text/event-stream")
 
     except httpx.ConnectError:
-        return JSONResponse(502, content={"error": "Cannot connect to upstream", "upstream": upstream_url})
+        return JSONResponse(502, content={"error": "Cannot connect to upstream", "upstream": upstream_url[:50]})
     except httpx.ReadTimeout:
-        return JSONResponse(504, content={"error": "Upstream timeout", "upstream": upstream_url})
+        return JSONResponse(504, content={"error": "Upstream timeout", "upstream": upstream_url[:50]})
     except httpx.RequestError as e:
-        return JSONResponse(502, content={"error": "Connection failed", "details": str(e)})
+        return JSONResponse(502, content={"error": "Connection failed", "details": str(e)[:150]})
     except Exception as e:
         print(f"[Proxy error] {type(e).__name__}: {e}")
-        return JSONResponse(500, content={"error": "Internal error", "details": str(e)[:200]})
+        return JSONResponse(500, content={"error": "Internal error", "details": str(e)[:150]})
 
 
 # ==========================================
-# 6. FALLBACK: Direct passthrough for root /v1/chat/completions
+# 6. FALLBACK ENDPOINT (no path prefix)
 # ==========================================
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def fallback_proxy(request: Request):
-    """Fallback for clients that don't use path-based routing."""
-    # Use environment variable for upstream if set
+    """Fallback for clients using standard endpoint."""
     upstream = os.getenv("UPSTREAM_URL", "https://openrouter.ai/api/v1/chat/completions")
     
     try:
@@ -303,6 +299,6 @@ async def fallback_proxy(request: Request):
         
         return StreamingResponse(stream(), media_type="text/event-stream")
     except Exception as e:
-        return JSONResponse(502, content={"error": str(e)})
+        return JSONResponse(502, content={"error": str(e)[:200]})
     finally:
         await client.aclose()
