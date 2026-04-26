@@ -271,7 +271,7 @@ async def intercept_upstream_stream(response: httpx.Response):
         except json.JSONDecodeError:
             pass
 
-@app.post("/v1/chat/completions")
+@app.post(["/v1/chat/completions", "/chat/completions"])
 async def chat_proxy(request: Request):
     # Auth
     if PROXY_KEY and request.headers.get("x-proxy-key") != PROXY_KEY:
