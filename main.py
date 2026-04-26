@@ -3,6 +3,7 @@ import re
 import json
 import httpx
 import time
+import asyncio
 from urllib.parse import unquote
 from fastapi import FastAPI, Request, HTTPException, Path
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -22,7 +23,6 @@ UPSTREAM_PRESETS = {
 }
 
 def resolve_upstream(prefix: str) -> str:
-    """Resolve upstream endpoint from path prefix or URL-encoded custom URL."""
     if prefix in UPSTREAM_PRESETS:
         return UPSTREAM_PRESETS[prefix]
     try:
@@ -37,7 +37,7 @@ def resolve_upstream(prefix: str) -> str:
 
 
 # ==========================================
-# 2. CORE ENGINE (Memory, Tags, World State)
+# 2. CORE ENGINE
 # ==========================================
 class JSkidCore:
     def __init__(self):
@@ -46,16 +46,13 @@ class JSkidCore:
         self.tools: list = []
 
     def parse(self, messages: list) -> "JSkidCore":
-        """Extract internal tags from conversation history."""
         self.memory.clear()
         self.vars.clear()
         self.tools.clear()
-        
         for msg in messages:
             content = msg.get("content", "")
             if not isinstance(content, str):
                 continue
-            
             tags = re.findall(
                 r'<!--\s*\[(SET_VAR|MEM_ADD|MEM_DEL|TOOL):\s*(.+?)\]\s*-->', 
                 content, re.DOTALL
@@ -78,16 +75,13 @@ class JSkidCore:
         return self
 
     def sanitize(self, messages: list) -> list:
-        """Remove internal tags and skip command messages before forwarding."""
         clean = []
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, str):
                 content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL).strip()
-                # Skip user commands that start with / or !
                 if msg["role"] == "user" and content.startswith(('/', '!')):
                     continue
-            
             if content or msg["role"] != "user":
                 new_msg = msg.copy()
                 new_msg["content"] = content if isinstance(content, str) else msg.get("content")
@@ -95,29 +89,25 @@ class JSkidCore:
         return clean
 
     def inject_state(self, messages: list) -> list:
-        """Add collected memory/variables as hidden context for the LLM."""
         if not self.memory and not self.vars:
             return messages
-            
-        state_parts = ["\n<hidden_context>"]
+        parts = ["\n<hidden_context>"]
         if self.memory:
-            state_parts.append(f"Memory: {'; '.join(self.memory)}")
+            parts.append(f"Memory: {'; '.join(self.memory)}")
         if self.vars:
-            state_parts.append(f"Variables: {'; '.join(f'{k}={v}' for k,v in self.vars.items())}")
-        state_parts.append("</hidden_context>\n")
-        
-        state_text = "".join(state_parts)
+            parts.append(f"Variables: {'; '.join(f'{k}={v}' for k,v in self.vars.items())}")
+        parts.append("</hidden_context>\n")
+        state = "".join(parts)
         for msg in messages:
             if msg["role"] == "system":
-                msg["content"] = msg.get("content", "") + state_text
+                msg["content"] = msg.get("content", "") + state
                 return messages
-                
-        messages.insert(0, {"role": "system", "content": state_text.strip()})
+        messages.insert(0, {"role": "system", "content": state.strip()})
         return messages
 
 
 # ==========================================
-# 3. OPTIONAL UI ENGINE (For /status command)
+# 3. UI ENGINE (for /status)
 # ==========================================
 class UIEngine:
     def __init__(self, width: int = 64):
@@ -134,16 +124,15 @@ class UIEngine:
 
 
 # ==========================================
-# 4. FASTAPI APPLICATION
+# 4. FASTAPI APP
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("✓ JSkid Proxy started | Path-based routing mode")
+    print("✓ JSkid Proxy started")
     yield
     print("✓ JSkid Proxy stopped")
 
 app = FastAPI(title="JSkid Proxy", lifespan=lifespan)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -157,7 +146,7 @@ async def root():
     return {
         "status": "running",
         "presets": list(UPSTREAM_PRESETS.keys()),
-        "usage": "Set JanitorAI API URL to: https://your-proxy.com/{preset}/v1"
+        "usage": "API URL: https://jskid.onrender.com/{preset}/v1"
     }
 
 @app.get("/health")
@@ -173,17 +162,15 @@ async def list_models():
 
 
 # ==========================================
-# 5. CHAT PROXY ENDPOINT
+# 5. ROBUST CHAT PROXY
 # ==========================================
 @app.post("/{prefix}/v1/chat/completions")
 @app.post("/{prefix}/chat/completions")
 async def proxy(request: Request, prefix: str = Path(...)):
-    # Resolve upstream endpoint
     upstream_url = resolve_upstream(prefix)
     if not upstream_url:
         raise HTTPException(400, detail=f"Unknown preset: {prefix}. Use: {list(UPSTREAM_PRESETS.keys())}")
 
-    # Parse request body
     try:
         body = await request.json()
     except Exception:
@@ -191,12 +178,11 @@ async def proxy(request: Request, prefix: str = Path(...)):
 
     messages = body.get("messages", [])
     if not messages:
-        raise HTTPException(400, detail="No messages provided")
+        raise HTTPException(400, detail="No messages")
 
-    # Initialize & process core state
     core = JSkidCore().parse(messages)
 
-    # Handle /status command locally (returns UI box)
+    # Handle /status locally
     last_msg = messages[-1].get("content", "") if messages else ""
     if last_msg.startswith("/status"):
         ui = UIEngine()
@@ -211,23 +197,29 @@ async def proxy(request: Request, prefix: str = Path(...)):
             "finish_reason": "stop"
         })
 
-    # Sanitize & inject state
     clean_msgs = core.sanitize(messages)
     clean_msgs = core.inject_state(clean_msgs)
-    
     body["messages"] = clean_msgs
     if core.tools:
         body["tools"] = core.tools
     body.setdefault("stream", True)
 
-    # Prepare headers for upstream
+    # Headers for upstream
     headers = {"Content-Type": "application/json"}
     auth = request.headers.get("Authorization")
     if auth:
         headers["Authorization"] = auth
+    # Copy useful headers for OpenRouter
+    for h in ["x-api-key", "http-referer", "x-title", "user-agent"]:
+        if request.headers.get(h):
+            headers[h] = request.headers[h]
 
-    # Forward to upstream
-    client = httpx.AsyncClient(timeout=180.0)
+    # === CRITICAL: Increased timeouts for Render free tier ===
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0),
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    )
+
     try:
         req = client.build_request("POST", upstream_url, json=body, headers=headers)
         resp = await client.send(req, stream=True)
@@ -235,22 +227,82 @@ async def proxy(request: Request, prefix: str = Path(...)):
         if resp.status_code != 200:
             err = await resp.aread()
             return JSONResponse(
-                resp.status_code, 
-                content={"error": f"Upstream {resp.status_code}", "details": err.decode()[:300]}
+                resp.status_code,
+                content={"error": f"Upstream {resp.status_code}", "details": err.decode()[:300] if err else ""}
             )
 
-        # Stream SSE exactly as received from upstream
+        # === Robust streaming with error handling ===
         async def stream_proxy():
-            async for line in resp.aiter_lines():
-                if line.strip():  # Skip empty keep-alive lines
-                    yield f"{line}\n\n"
-            await client.aclose()
+            try:
+                async for line in resp.aiter_lines():
+                    if line.strip():
+                        yield f"{line}\n\n"
+            except httpx.ReadError:
+                # Connection dropped - send graceful finish
+                yield ' {"choices":[{"delta":{"content":"\\n\\n[Connection interrupted]"},"finish_reason":"stop"}]}\n\n'
+                yield " [DONE]\n\n"
+            except asyncio.CancelledError:
+                # Client disconnected - clean up
+                pass
+            except Exception as e:
+                # Log and send error chunk
+                print(f"[Stream error] {e}")
+                yield f' {{"error":"Streaming error: {str(e)[:100]}"}}\n\n'
+            finally:
+                await resp.aclose()
+                await client.aclose()
 
         return StreamingResponse(stream_proxy(), media_type="text/event-stream")
 
+    except httpx.ConnectError:
+        return JSONResponse(502, content={"error": "Cannot connect to upstream", "upstream": upstream_url})
+    except httpx.ReadTimeout:
+        return JSONResponse(504, content={"error": "Upstream timeout", "upstream": upstream_url})
     except httpx.RequestError as e:
         return JSONResponse(502, content={"error": "Connection failed", "details": str(e)})
     except Exception as e:
-        return JSONResponse(500, content={"error": "Internal error", "details": str(e)})
+        print(f"[Proxy error] {type(e).__name__}: {e}")
+        return JSONResponse(500, content={"error": "Internal error", "details": str(e)[:200]})
+
+
+# ==========================================
+# 6. FALLBACK: Direct passthrough for root /v1/chat/completions
+# ==========================================
+@app.post("/v1/chat/completions")
+@app.post("/chat/completions")
+async def fallback_proxy(request: Request):
+    """Fallback for clients that don't use path-based routing."""
+    # Use environment variable for upstream if set
+    upstream = os.getenv("UPSTREAM_URL", "https://openrouter.ai/api/v1/chat/completions")
+    
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="Invalid JSON")
+    
+    body.setdefault("stream", True)
+    headers = {"Content-Type": "application/json"}
+    auth = request.headers.get("Authorization")
+    if auth:
+        headers["Authorization"] = auth
+    
+    client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+    try:
+        req = client.build_request("POST", upstream, json=body, headers=headers)
+        resp = await client.send(req, stream=True)
+        
+        if resp.status_code != 200:
+            err = await resp.aread()
+            return JSONResponse(resp.status_code, content={"error": f"Upstream {resp.status_code}"})
+        
+        async def stream():
+            async for line in resp.aiter_lines():
+                if line.strip():
+                    yield f"{line}\n\n"
+            await client.aclose()
+        
+        return StreamingResponse(stream(), media_type="text/event-stream")
+    except Exception as e:
+        return JSONResponse(502, content={"error": str(e)})
     finally:
         await client.aclose()
