@@ -9,7 +9,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
-from pathlib import Path
 
 # ==========================================
 # 1. CONFIGURATION & STATE MANAGEMENT
@@ -29,18 +28,12 @@ def save_config(config: dict):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
 
-# Global config state
 GLOBAL_CONFIG = load_config()
 
 # ==========================================
-# 2. CHAT-COMPATIBLE UI ENGINE (Wider: 64 chars)
+# 2. CHAT-COMPATIBLE UI ENGINE (64 chars wide)
 # ==========================================
 class AestheticEngine:
-    """
-    Terminal UI engine optimized for chat interfaces.
-    No ANSI codes - uses plain Unicode box characters.
-    Default width: 64 characters for better readability.
-    """
     def __init__(self, theme: str = "clean", width: int = 64):
         self.theme = theme
         self.width = width
@@ -50,15 +43,12 @@ class AestheticEngine:
         }
         
     def _visual_len(self, text: str) -> int:
-        """Calculate visible character length (ignoring control codes)."""
         clean = re.sub(r'\x1b\[[0-9;]*m', '', text)
         return len(clean)
     
     def _pad(self, text: str, width: int, align: str = "left") -> str:
-        """Pad text to target width based on visual length."""
         visible_len = self._visual_len(text)
         padding_needed = max(0, width - visible_len)
-        
         if align == "center":
             left = padding_needed // 2
             right = padding_needed - left
@@ -68,13 +58,11 @@ class AestheticEngine:
         return text + " " * padding_needed
 
     def _wrap_text(self, text: str, max_width: int) -> list:
-        """Wrap text to fit within box width."""
         if not text:
             return [""]
         words = text.split()
         lines = []
         current = ""
-        
         for word in words:
             test = current + (" " if current else "") + word
             if self._visual_len(test) <= max_width:
@@ -88,28 +76,23 @@ class AestheticEngine:
         return lines
 
     def render_box(self, title: str, content_lines: list, width: int = None) -> str:
-        """Render a clean box that works in plain text chats."""
         if width is None:
             width = self.width
         c = self.chars
         inner_width = width - 4
-        
         title_display = f" {title} "
         title_padded = self._pad(title_display, width - 4, "center")
         header = f"{c['tl']}{c['h'] * 2}{title_padded}{c['h'] * 2}{c['tr']}"
-        
         body = []
         for line in content_lines:
             wrapped = self._wrap_text(line, inner_width) if line else [""]
             for wrapped_line in wrapped:
                 padded = self._pad(wrapped_line, inner_width, "left")
                 body.append(f"{c['v']} {padded} {c['v']}")
-        
         footer = f"{c['bl']}{c['h'] * (width - 2)}{c['br']}"
         return "\n".join([header] + body + [footer])
 
     def render_setup_wizard_step(self, step: int, total: int, message: str, input_hint: str = "") -> str:
-        """Render wizard step - optimized for chat display."""
         lines = [f"SETUP [{step}/{total}]", "", message]
         if input_hint:
             lines.append("")
@@ -117,19 +100,16 @@ class AestheticEngine:
         return self.render_box("CONFIGURATION", lines)
 
     def render_status(self, status: str, memory_count: int, theme_name: str) -> str:
-        """Render compact status dashboard."""
         lines = [
             f"Status  : {status}",
             f"Memory  : {memory_count} items",
             f"Theme   : {theme_name}",
-            f"Proxy   : Active",
-            f"Width   : {self.width} chars"
+            f"Proxy   : Active"
         ]
-        return self.render_box("JSKID DASHBOARD", lines)
+        return self.render_box("JSKID", lines)
 
     def render_command_list(self, commands: list) -> str:
-        """Render a list of available commands."""
-        lines = ["Available Commands:"]
+        lines = ["Commands:"]
         for cmd in commands:
             lines.append(f"  • {cmd}")
         return self.render_box("HELP", lines)
@@ -150,16 +130,13 @@ class JSkidCore:
         self.memory.clear()
         self.chars.clear()
         self.tools.clear()
-
         for msg in messages:
             content = msg.get("content", "")
             if not isinstance(content, str): 
                 continue
-            
             tags = re.findall(
                 r'<!--\s*\[(SET_VAR|MEM_ADD|MEM_DEL|EXT|TOOL|SET_THEME|SET_WIDTH):\s*(.*?)]\s*-->', 
-                content, 
-                re.DOTALL
+                content, re.DOTALL
             )
             for tag_type, val in tags:
                 val = val.strip()
@@ -195,14 +172,11 @@ class JSkidCore:
             if not isinstance(content, str) or not content:
                 clean.append(msg)
                 continue
-            
             content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
             content = re.sub(r'┌[─\s]*┐[\s\S]*?└[─\s]*┘', '', content)
             content = content.strip()
-            
             if msg["role"] == "user" and content.startswith(('/', '!')):
                 continue
-                
             if content:
                 msg["content"] = content
                 clean.append(msg)
@@ -211,14 +185,12 @@ class JSkidCore:
     def inject_world_state(self, messages):
         if not self.memory and not self.chars:
             return messages
-        
         ws_parts = ["\n<world_state>"]
         if self.memory:
             ws_parts.append(f"<mem>{'; '.join(self.memory)}</mem>")
         if self.chars:
             ws_parts.append(f"<vars>{'; '.join(f'{k}={v}' for k, v in self.chars.items())}</vars>")
         ws_parts.append("</world_state>\n")
-        
         ws_text = "".join(ws_parts)
         injected = False
         for msg in messages:
@@ -237,10 +209,7 @@ class JSkidCore:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("--- JSkid Proxy Started ---")
-    print(f"Config file: {CONFIG_FILE}")
-    print(f"Configured: {'Yes' if load_config().get('UPSTREAM_URL') else 'No'}")
     yield
-    print("--- JSkid Proxy Stopped ---")
 
 app = FastAPI(title="JSkid Proxy", lifespan=lifespan)
 
@@ -253,11 +222,9 @@ app.add_middleware(
 )
 
 
-# --- Helper: Run Setup Wizard Logic ---
+# --- Setup Wizard ---
 async def run_setup_wizard(messages: list, current_config: dict) -> StreamingResponse:
-    """Chat-friendly setup wizard that guides user through configuration."""
     ui = AestheticEngine(width=64)
-    
     last_msg = messages[-1].get("content", "").strip() if messages else ""
     
     step = 1
@@ -277,35 +244,33 @@ async def run_setup_wizard(messages: list, current_config: dict) -> StreamingRes
             save_config(current_config)
             response_text = ui.render_setup_wizard_step(
                 2, 2, 
-                "✓ API URL saved successfully.\n\nNext: Enter your API key below.\n(Type 'skip' or leave blank if no key required)", 
+                "✓ API URL saved.\n\nNext: Enter your API key below.\n(Type 'skip' if none required)", 
                 "Enter API Key or 'skip'"
             )
         else:
             response_text = ui.render_setup_wizard_step(
                 1, 2,
-                "Welcome to JSkid Proxy!\n\nPlease paste your upstream API endpoint URL:\n\nExample:\nhttps://api.openai.com/v1/chat/completions\nhttps://api.anthropic.com/v1/messages",
-                "Paste your API URL here..."
+                "Welcome to JSkid Proxy!\n\nPaste your upstream API endpoint:\n\nExample:\nhttps://api.openai.com/v1/chat/completions",
+                "Paste URL here..."
             )
-            
     elif step == 2:
         key = last_msg.strip() if last_msg.strip().lower() != "skip" else None
         current_config["PROXY_KEY"] = key
         save_config(current_config)
-        
         status_box = ui.render_status("READY", 0, "clean")
         help_box = ui.render_command_list([
             "/theme <name>  - Change UI style",
-            "/width <num>   - Adjust box width", 
-            "/status        - Show current config",
-            "/reset         - Clear all memory"
+            "/width <num>   - Adjust width",
+            "/reset         - Clear memory"
         ])
-        response_text = f"{ui.render_setup_wizard_step(2, 2, '✓ Setup complete! Your proxy is ready.', 'Start chatting normally.')}\n\n{status_box}\n\n{help_box}"
+        response_text = f"{ui.render_setup_wizard_step(2, 2, '✓ Setup complete!', 'Start chatting.')}\n\n{status_box}\n\n{help_box}"
 
     async def wizard_stream():
+        # CRITICAL: Use "data: " prefix for SSE compatibility
         chunks = [response_text[i:i+150] for i in range(0, len(response_text), 150)]
         for i, chunk in enumerate(chunks):
             is_last = (i == len(chunks) - 1)
-            data = {
+            chunk_data = {
                 "id": "chatcmpl-wizard",
                 "object": "chat.completion.chunk", 
                 "created": int(time.time()),
@@ -316,24 +281,21 @@ async def run_setup_wizard(messages: list, current_config: dict) -> StreamingRes
                     "finish_reason": "stop" if is_last else None
                 }]
             }
-            yield f" {json.dumps(data)}\n\n"
+            # FIX: Proper SSE format with "data: " prefix
+            yield f"data: {json.dumps(chunk_data)}\n\n"
             if not is_last:
                 await asyncio.sleep(0.01)
-        yield " [DONE]\n\n"
+        # FIX: Proper [DONE] format
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(wizard_stream(), media_type="text/event-stream")
 
 
-# --- Standard Endpoints ---
+# --- Endpoints ---
 @app.get("/")
 async def root():
     config = load_config()
-    return {
-        "status": "running", 
-        "configured": "UPSTREAM_URL" in config,
-        "width": 64,
-        "themes": ["clean", "compact", "spacious"]
-    }
+    return {"status": "running", "configured": "UPSTREAM_URL" in config}
 
 @app.get("/health")
 async def health():
@@ -343,13 +305,11 @@ async def health():
 async def list_models():
     return {
         "object": "list",
-        "data": [
-            {"id": "jskid-proxy", "object": "model", "owned_by": "jskid", "created": int(time.time())}
-        ]
+        "data": [{"id": "jskid-proxy", "object": "model", "owned_by": "jskid", "created": int(time.time())}]
     }
 
 
-# --- Chat Completion Endpoint ---
+# --- Chat Completion ---
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat_proxy(request: Request):
@@ -372,12 +332,9 @@ async def chat_proxy(request: Request):
     engine.parse_state(messages)
 
     last_msg_content = messages[-1].get("content", "")
-    
     if last_msg_content.startswith("/status"):
         ui = AestheticEngine(width=engine.ui_width)
-        status_text = ui.render_status("ONLINE", len(engine.memory), engine.ui_theme)
-        messages.append({"role": "system", "content": status_text})
-    
+        messages.append({"role": "system", "content": ui.render_status("ONLINE", len(engine.memory), engine.ui_theme)})
     if last_msg_content.startswith("/reset"):
         engine.memory.clear()
         engine.chars.clear()
@@ -389,7 +346,6 @@ async def chat_proxy(request: Request):
     payload["messages"] = clean_msgs
     if engine.tools:
         payload["tools"] = engine.tools
-
     if "stream" not in payload:
         payload["stream"] = True
 
@@ -421,25 +377,23 @@ async def chat_proxy(request: Request):
             chunk_count = 0
             
             async for line in resp.aiter_lines():
-                if not line.startswith(" "):
+                if not line.startswith("data:"):
                     continue
-                data_str = line[6:].strip()
+                data_str = line[5:].strip()  # Remove "data: " prefix from upstream
                 
                 if data_str == "[DONE]":
                     if buffer.strip():
-                        yield f" {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
+                        # FIX: Proper SSE format
+                        yield f"data: {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
                     
+                    # Optional footer
                     if chunk_count < 50:
                         footer = f"\n\n{ui.render_status('OK', len(engine.memory), engine.ui_theme)}"
-                        finish_payload = {
-                            "choices": [{
-                                "delta": {"content": footer}, 
-                                "finish_reason": "stop"
-                            }]
-                        }
-                        yield f" {json.dumps(finish_payload)}\n\n"
+                        finish_payload = {"choices": [{"delta": {"content": footer}, "finish_reason": "stop"}]}
+                        yield f"data: {json.dumps(finish_payload)}\n\n"
                     
-                    yield " [DONE]\n\n"
+                    # FIX: Proper [DONE] format
+                    yield "data: [DONE]\n\n"
                     break
 
                 try:
@@ -449,25 +403,18 @@ async def chat_proxy(request: Request):
                         text = delta["content"]
                         buffer += text
                         chunk_count += 1
-                        
                         if len(buffer) > 200 or "\n" in text:
-                            yield f" {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
+                            # FIX: Proper SSE format
+                            yield f"data: {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
                             buffer = ""
-                            
                 except json.JSONDecodeError:
                     continue
                     
         return StreamingResponse(proxy_stream(), media_type="text/event-stream")
 
     except httpx.RequestError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": "Upstream Connection Failed", "details": str(e)}
-        )
+        return JSONResponse(status_code=502, content={"error": "Connection Failed", "details": str(e)})
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Internal Error", "details": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": "Internal Error", "details": str(e)})
     finally:
         await client.aclose()
