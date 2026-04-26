@@ -379,23 +379,27 @@ async def chat_proxy(request: Request):
             in_bracket = False
             ui = AestheticEngine(theme=engine.ui_theme)
             
-            # Prepend a small status dashboard to the stream? 
-            # Note: JanitorAI might render this as part of the message. 
-            # Ideally, this is done in a system message, but for streaming effect:
-            
             async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
+                if not line.startswith(" "):
                     continue
                 data_str = line[6:]
                 
                 if data_str == "[DONE]":
                     # Flush buffer
                     if buffer:
-                         yield f"data: {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
+                         yield f" {json.dumps({'choices': [{'delta': {'content': buffer}}]})}\n\n"
                     
                     # Append a footer dashboard at the end of the stream
                     dashboard = ui.render_status("ONLINE", len(engine.memory), engine.ui_theme)
-                    yield f"data: {json.dumps({'choices': [{'delta': {'content': '\n\n' + dashboard}}, 'finish_reason': 'stop'}]})}\n\n"
+                    # FIX: Build content string outside f-string to avoid backslash in expression
+                    footer_content = "\n\n" + dashboard
+                    finish_payload = {
+                        "choices": [{
+                            "delta": {"content": footer_content}, 
+                            "finish_reason": "stop"
+                        }]
+                    }
+                    yield f"data: {json.dumps(finish_payload)}\n\n"
                     yield "data: [DONE]\n\n"
                     break
 
@@ -404,8 +408,6 @@ async def chat_proxy(request: Request):
                     delta = data["choices"][0].get("delta", {})
                     if "content" in delta:
                         text = delta["content"]
-                        # Simple parser for inline tags to convert them to visible UI elements if desired
-                        # For now, we just pass them through, the frontend or next prompt handles them
                         yield f"data: {json.dumps({'choices': [{'delta': {'content': text}}]})}\n\n"
                         
                 except json.JSONDecodeError:
