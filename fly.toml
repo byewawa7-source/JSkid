@@ -1,35 +1,37 @@
-app = "jskid-proxy-v2"
-primary_region = "iad"  # Change to your preferred region
+# fly.toml app configuration file generated for jskid on 2026-04-27T00:23:54Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'jskid'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "8080"
-  # Optional: Set default upstream if using fallback endpoint
-  # UPSTREAM_URL = "https://openrouter.ai/api/v1/chat/completions"
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = true   # Save credits when idle
-  auto_start_machines = true  # Wake on request
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
   [http_service.concurrency]
-    type = "requests"
+    type = 'requests'
     hard_limit = 25
     soft_limit = 20
-
-[[vm]]
-  size = "shared-cpu-1x"  # Free tier: 256MB RAM, shared CPU
-  # Upgrade to "shared-cpu-2x" ($5/mo) for better streaming performance
 
 [checks]
   [checks.health]
     port = 8080
-    type = "http"
-    interval = "30s"
-    timeout = "10s"
-    path = "/health"
+    type = 'http'
+    interval = '30s'
+    timeout = '10s'
+    path = '/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
