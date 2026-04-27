@@ -1,22 +1,21 @@
-# Use official Python runtime as a parent image
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Copy the requirements file first (for better caching)
-COPY requirements.txt .
-
 # Install dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy application
 COPY . .
 
-# Expose the port the app runs on
-EXPOSE 8080
+# Create non-root user for security
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
 
-# Command to run the application
-# We bind to 0.0.0.0 so it's accessible externally
-# We use port 8080 (standard for Render/Railway)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import httpx; httpx.get('http://localhost:8080/health')" || exit 1
+
+# Run with uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
